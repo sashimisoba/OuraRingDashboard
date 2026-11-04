@@ -1,0 +1,5 @@
+# secrets
+.env
+.oura_tokens.json
+.tokens-*.tmp
+__pycache__/

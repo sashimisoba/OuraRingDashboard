@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Oura ダッシュボード</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <h1>Oura ダッシュボード</h1>
+      <div class="top-status" id="status"></div>
+    </header>
+
+    <nav class="filters" id="filters" aria-label="表示期間">
+      <div class="seg" id="ranges" role="radiogroup" aria-label="期間"></div>
+      <button class="btn" id="refresh" type="button">更新</button>
+      <span class="updated" id="updated"></span>
+    </nav>
+
+    <div class="notice" id="notice" hidden></div>
+    <section class="setup" id="setup" hidden></section>
+
+    <main id="main">
+      <section class="scores" id="scores" aria-label="今日のスコア"></section>
+      <section class="metrics" id="metrics" aria-label="主な指標"></section>
+      <div class="grid" id="grid"></div>
+    </main>
+  </div>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

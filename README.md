@@ -150,7 +150,7 @@ OuraRingDashboard/
 | ログイン後に「Redirect URI Does Not Match」などと出る | Oura に登録した Redirect URI と `.env` の `OURA_REDIRECT_URI` が完全に同じか (`localhost` と `127.0.0.1`、末尾の `/` の有無も区別されます)。Oura の登録画面が `localhost` を受け付けない場合は `http://127.0.0.1:8765/callback` を両方に設定し、ブラウザで http://127.0.0.1:8765/ を開いてください |
 | 原因が分からない | ログインしたあと、サーバーを止めて `python3 server.py --check` を実行します。データの種類ごとに読めたかどうかと、Oura が返したエラーの内容を表示します (トークンは表示しません) |
 | ログイン時に `invalid_scope` | `.env` に `OURA_SCOPES` を書いている場合は消すか、アプリ登録でチェックしたスコープだけにする |
-| 一部のカードが空で「Missing Scopes」と出る | そのデータを読む権限がありません。アプリ登録でそのスコープにチェックが入っているか確認し、右上の「ログアウト」からログインし直して、許可画面で共有をオンにする |
+| 一部のカードが空で「Missing Scopes」や「not authorized access ... scope」と出る | そのデータを読む権限がありません。アプリ登録でそのスコープにチェックが入っているか確認し、右上の「ログアウト」からログインし直して、許可画面で共有をオンにする |
 | 一部のカードが空で「403」と出る | Oura の許可画面でそのデータの共有をオフにした、Oura メンバーシップが切れている、またはリングが対応していない |
 | 「Oura にデータの読み取りを断られました」 | どのデータも 401 で拒否されました。表示されたエラーの内容を確認し、もう一度ログインしてください。続くときは `--check` の結果を確認する |
 | 今日の睡眠が出ない | 睡眠データは Oura アプリを開いて同期したあとに API に反映されます。アプリを開いてから「更新」を押す |
@@ -179,5 +179,6 @@ OURA_SANDBOX_TEST=1 python3 -m unittest discover -s tests
 - `sleep` の `day` は「起きた日」。昼寝 (`late_nap` など) も含まれるので、各日の `long_sleep` を主な睡眠として扱っている
 - 5分ごとの睡眠ステージは `sleep_phase_5_min` が空で `app_sleep_phase_5_min` にだけ入っていることがある。このツールは `app_sleep_phase_5_min` (アプリの表示に合わせた方) を優先し、なければ `sleep_phase_5_min` を使う
 - ワークアウトの `label` が文字列の `"None"` で返ることがある (Sandbox で確認)。その場合はラベルなしとして扱う
+- `daily_resilience` を読むには `stress` スコープが必要。ないと 401 `Token is not authorized access stress scope.` が返る (403 ではない)。権限不足が 401 で返ることがあるので、このツールは 401 を受けても、すべてのデータが断られたときだけログアウト扱いにしている
 - Sandbox は `/v2/sandbox/usercollection/...` で、`Authorization` ヘッダーに任意の文字列を入れれば使える。`personal_info` はない
 - API 仕様書 (OpenAPI): https://cloud.ouraring.com/v2/static/json/openapi-1.43.json

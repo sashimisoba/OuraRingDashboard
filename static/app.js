@@ -259,7 +259,7 @@ function renderNotice(view, payload) {
     items.push(el('p', { style: 'margin:0' }, el('strong', { text: '一部のデータを取得できませんでした。' }), ' 権限 (スコープ) がない、またはリングが対応していない可能性があります。'));
     items.push(el('ul', {}, errs.map(([k, msg]) => el('li', { text: `${COLLECTION_NAMES[k] || k}: ${msg}` }))));
     if (errs.some(([, msg]) => /scope/i.test(msg))) {
-      items.push(el('p', { style: 'margin:8px 0 0' }, '「Missing Scopes」は、そのデータを読む権限がないという意味です。Oura のアプリ登録画面でそのスコープにチェックが入っているか確認し、右上の「ログアウト」からログインし直して、許可画面で共有をオンにしてください。'));
+      items.push(el('p', { style: 'margin:8px 0 0' }, '「scope」を含むエラーは、そのデータを読む権限が今のログインにないという意味です。右上の「ログアウト」からログインし直し、Oura の許可画面で共有をオンにしてください。それでも出るときは、Oura のアプリ登録画面でそのスコープにチェックが入っているか確認してください。'));
     }
   }
   box.hidden = !items.length;

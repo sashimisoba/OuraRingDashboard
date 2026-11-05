@@ -42,14 +42,20 @@ python3 server.py --sandbox
 Oura は 2025年12月に Personal Access Token を廃止しました。今は自分のデータを読むだけでも OAuth2 のアプリ登録が必要です。
 
 1. https://cloud.ouraring.com/oauth/applications を開き、Oura アカウントでログインします
-2. 新しいアプリを作ります。名前などの必須項目を入力します
-3. **Redirect URI** に次の値を入れます。1文字でも違うとログインに失敗します
+2. 新しいアプリを作り、次のように入力します
 
-   ```
-   http://localhost:8765/callback
-   ```
+   | 項目 | 入力する内容 |
+   |---|---|
+   | Display Name | `My Oura Dashboard` など (ログイン時の許可画面に出る名前) |
+   | Description | `Personal dashboard that shows my own Oura data on my computer.` など |
+   | Contact Email | 自分のメールアドレス |
+   | Website / Privacy Policy / Terms of Service | このリポジトリの URL (`https://github.com/sashimisoba/OuraRingDashboard`) |
+   | Redirect URIs | `http://localhost:8765/callback` (1文字でも違うとログインに失敗します) |
+   | Scopes | すべてチェックしたままにする |
 
-4. 保存すると **Client ID** と **Client Secret** が表示されます
+3. 保存すると **Client ID** と **Client Secret** が表示されます
+
+ログイン時、このツールはアプリ登録でチェックしたスコープをそのまま求めます。Oura の許可画面では、データの種類ごとに共有のオン・オフを選べます。
 
 登録したアプリは、承認前でも10人まで使えます。自分1人で使う分には承認は不要です。
 
@@ -133,7 +139,7 @@ OuraRingDashboard/
 | `OURA_CLIENT_ID` | なし (必須) | アプリの Client ID |
 | `OURA_CLIENT_SECRET` | なし (必須) | アプリの Client Secret |
 | `OURA_REDIRECT_URI` | `http://localhost:<OURA_PORT>/callback` | Oura に登録した Redirect URI と同じ値 |
-| `OURA_SCOPES` | `personal daily heartrate workout spo2 heart_health` | 読み取る権限 (スペース区切り) |
+| `OURA_SCOPES` | なし (アプリ登録でチェックしたスコープをすべて求める) | 求める権限を絞るときに、スペース区切りで指定する (例 `daily heartrate personal`) |
 | `OURA_PORT` | `8765` | 変えるときは Redirect URI も合わせて変更し、Oura 側の登録も直す |
 | `OURA_TOKEN_FILE` | `.oura_tokens.json` | トークンの保存先 |
 
@@ -142,8 +148,11 @@ OuraRingDashboard/
 | 症状 | 確認すること |
 |---|---|
 | ログイン後に「Redirect URI Does Not Match」などと出る | Oura に登録した Redirect URI と `.env` の `OURA_REDIRECT_URI` が完全に同じか (`localhost` と `127.0.0.1`、末尾の `/` の有無も区別されます)。Oura の登録画面が `localhost` を受け付けない場合は `http://127.0.0.1:8765/callback` を両方に設定し、ブラウザで http://127.0.0.1:8765/ を開いてください |
-| ログイン時に `invalid_scope` | `.env` の `OURA_SCOPES` から `heart_health` などを外す |
+| 原因が分からない | ログインしたあと、サーバーを止めて `python3 server.py --check` を実行します。データの種類ごとに読めたかどうかと、Oura が返したエラーの内容を表示します (トークンは表示しません) |
+| ログイン時に `invalid_scope` | `.env` に `OURA_SCOPES` を書いている場合は消すか、アプリ登録でチェックしたスコープだけにする |
+| 一部のカードが空で「Missing Scopes」と出る | そのデータを読む権限がありません。アプリ登録でそのスコープにチェックが入っているか確認し、右上の「ログアウト」からログインし直して、許可画面で共有をオンにする |
 | 一部のカードが空で「403」と出る | Oura の許可画面でそのデータの共有をオフにした、Oura メンバーシップが切れている、またはリングが対応していない |
+| 「Oura にデータの読み取りを断られました」 | どのデータも 401 で拒否されました。表示されたエラーの内容を確認し、もう一度ログインしてください。続くときは `--check` の結果を確認する |
 | 今日の睡眠が出ない | 睡眠データは Oura アプリを開いて同期したあとに API に反映されます。アプリを開いてから「更新」を押す |
 | 「ログインの有効期限が切れました」 | リフレッシュトークンは1回しか使えません。同じトークンを別のツールでも使っていると無効になります。もう一度ログインしてください |
 

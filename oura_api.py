@@ -31,13 +31,18 @@ API_BASE = "https://api.ouraring.com"
 # guaranteed to be accepted.
 USER_AGENT = "OuraPersonalDashboard/1.0"
 
-DEFAULT_SCOPES = "personal daily heartrate workout spo2 heart_health"
+# Empty = leave `scope` out of the login request. Oura then asks for every scope
+# the app was registered with, so the scopes ticked on the app page are used as-is.
+DEFAULT_SCOPES = ""
 
 # Refresh a little before the token actually expires.
 EXPIRY_MARGIN_SECONDS = 120
 # How long a /login attempt stays valid.
 STATE_TTL_SECONDS = 600
 MAX_RATE_LIMIT_RETRIES = 2
+# A token this new that gets a 401 is not expired; refreshing would only burn the
+# single-use refresh token, so the error is reported instead.
+FRESH_TOKEN_SECONDS = 60
 MAX_RETRY_AFTER_SECONDS = 30
 REQUEST_TIMEOUT_SECONDS = 30
 
@@ -59,18 +64,28 @@ class NotAuthenticated(OuraError):
 
 
 def _error_message(body: bytes) -> str:
-    """Pull a readable message out of an RFC 7807 / OAuth error body."""
+    """Pull a readable message out of an RFC 7807 / OAuth error body (title + detail)."""
     try:
         data = json.loads(body.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
         text = body.decode("utf-8", "replace").strip()
         return text[:300] or "unknown error"
-    if isinstance(data, dict):
-        for key in ("error_description", "detail", "title", "message", "error"):
-            value = data.get(key)
-            if value:
-                return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    return json.dumps(data, ensure_ascii=False)[:300]
+    if not isinstance(data, dict):
+        return json.dumps(data, ensure_ascii=False)[:300]
+    parts: list[str] = []
+    for key in ("title", "error_description", "detail", "message", "error"):
+        value = data.get(key)
+        if not value:
+            continue
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        if not any(text in p or p in text for p in parts):
+            parts.append(text)
+    return ": ".join(parts)[:400] or json.dumps(data, ensure_ascii=False)[:300]
+
+
+def _is_scope_error(message: str) -> bool:
+    # "Missing Scopes" can come back as 401; a new token would not help.
+    return "scope" in message.lower()
 
 
 class TokenStore:
@@ -184,17 +199,17 @@ class OuraClient:
         with self._pending_lock:
             self._pending = {s: v for s, v in self._pending.items() if now - v[1] < STATE_TTL_SECONDS}
             self._pending[state] = (verifier, now)
-        query = urllib.parse.urlencode(
-            {
-                "response_type": "code",
-                "client_id": self.client_id,
-                "redirect_uri": self.redirect_uri,
-                "scope": self.scopes,
-                "state": state,
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-            }
-        )
+        params = {
+            "response_type": "code",
+            "client_id": self.client_id,
+            "redirect_uri": self.redirect_uri,
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+        if self.scopes:
+            params["scope"] = self.scopes
+        query = urllib.parse.urlencode(params)
         return f"{self.authorize_endpoint}?{query}"
 
     def handle_callback(self, code: str | None, state: str | None, error: str | None = None) -> None:
@@ -268,6 +283,7 @@ class OuraClient:
             # Oura may not send a new refresh token on every refresh.
             "refresh_token": data.get("refresh_token") or (previous or {}).get("refresh_token"),
             "expires_at": self._clock() + float(expires_in) if expires_in else None,
+            "obtained_at": self._clock(),
             "scope": data.get("scope") or (previous or {}).get("scope"),
         }
 
@@ -327,12 +343,16 @@ class OuraClient:
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as e:
                 body = e.read()
-                if e.code == 401 and not refreshed:
+                message = _error_message(body)
+                fresh = self._clock() - float(tokens.get("obtained_at") or 0) < FRESH_TOKEN_SECONDS
+                if e.code == 401 and not refreshed and not fresh and not _is_scope_error(message):
                     refreshed = True
                     tokens = self._refresh(tokens["access_token"])
                     continue
                 if e.code == 401:
-                    raise NotAuthenticated("トークンが無効です。もう一度ログインしてください") from None
+                    # Reported per collection; the caller decides whether the
+                    # login as a whole is broken (see LiveSource.dashboard).
+                    raise OuraError(401, message) from None
                 if e.code == 429 and rate_limited < MAX_RATE_LIMIT_RETRIES:
                     rate_limited += 1
                     try:
@@ -341,7 +361,7 @@ class OuraClient:
                         wait = 5
                     self._sleep(min(max(wait, 1), MAX_RETRY_AFTER_SECONDS))
                     continue
-                raise OuraError(e.code, _error_message(body)) from None
+                raise OuraError(e.code, message) from None
             except (urllib.error.URLError, OSError, ValueError) as e:
                 raise OuraError(0, f"Oura API に接続できませんでした: {e}") from None
 

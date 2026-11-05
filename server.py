@@ -189,6 +189,7 @@ class LiveSource:
 
         results: dict = {}
         errors: dict = {}
+        statuses: dict = {}
         with ThreadPoolExecutor(max_workers=4) as pool:
             futures = {name: pool.submit(run, name) for name in jobs}
             for name, fut in futures.items():
@@ -198,7 +199,18 @@ class LiveSource:
                     raise
                 except OuraError as e:
                     errors[name] = str(e)
+                    statuses[name] = e.status
                     results[name] = None if name == "personal_info" else []
+                    print(f"  Oura API エラー: {name}: {e}", file=sys.stderr)
+
+        # Every collection refused even after a token refresh: the login itself is
+        # unusable. One or two 401s (e.g. "Missing Scopes") only blank those cards.
+        if len(statuses) == len(jobs) and all(code == 401 for code in statuses.values()):
+            if self.mode == "live":
+                client.tokens.clear()
+            raise NotAuthenticated(
+                f"Oura にデータの読み取りを断られました ({next(iter(errors.values()))})。もう一度ログインしてください"
+            )
 
         personal = results.pop("personal_info", None)
         heartrate = results.pop("heartrate")
@@ -398,11 +410,52 @@ def build_source(args, env: dict):
     return LiveSource(client)
 
 
+def run_check(source) -> int:
+    """Print, per collection, whether the saved login can read it (tokens are never printed)."""
+    if not isinstance(source, LiveSource) or source.client is None:
+        print(getattr(source, "config_problem", None) or "--check は --demo なしで使ってください")
+        return 1
+    client = source.client
+    tokens = client.tokens.load()
+    if source.mode == "live":
+        if not tokens:
+            print("ログインしていません。python3 server.py で起動し、ブラウザでログインしてください。")
+            return 1
+        expires = tokens.get("expires_at")
+        when = dt.datetime.fromtimestamp(expires).strftime("%Y-%m-%d %H:%M") if expires else "不明"
+        print(f"トークン: あり (有効期限 {when})")
+        print(f"許可されたスコープ: {tokens.get('scope') or '(Oura から返されていません)'}")
+    end = dt.date.today()
+    day_params = {"start_date": (end - dt.timedelta(days=6)).isoformat(), "end_date": (end + dt.timedelta(days=1)).isoformat()}
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    checks = [(name, day_params) for name in DAILY_COLLECTIONS]
+    checks.append(("heartrate", {"start_datetime": (now - dt.timedelta(hours=24)).isoformat(), "end_datetime": now.isoformat()}))
+    if source.mode == "live":
+        checks.append(("personal_info", None))
+    failed = 0
+    print("直近7日分を1ページずつ読みます:")
+    for name, params in checks:
+        try:
+            page = client.get(f"{source.prefix}/{name}", params)
+        except NotAuthenticated as e:
+            print(f"  NG  {name:26s} {e}")
+            return 1
+        except OuraError as e:
+            failed += 1
+            print(f"  NG  {name:26s} {e}")
+            continue
+        count = len(page.get("data") or []) if isinstance(page.get("data"), list) else 1
+        print(f"  OK  {name:26s} {count} 件")
+    print("すべて読めました。" if not failed else f"{failed} 種類のデータを読めませんでした。上のメッセージを確認してください。")
+    return 0 if not failed else 2
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Oura Ring の個人用ダッシュボード")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--demo", action="store_true", help="手元で作ったサンプルデータで起動する (Oura アカウント不要)")
     mode.add_argument("--sandbox", action="store_true", help="Oura API の Sandbox (テスト用データ) を読む (ログイン不要)")
+    parser.add_argument("--check", action="store_true", help="ログイン済みのトークンで各データを取得できるか調べて終了する")
     parser.add_argument("--port", type=int, default=None, help=f"ポート番号 (既定 {DEFAULT_PORT})")
     parser.add_argument("--no-browser", action="store_true", help="起動時にブラウザを開かない")
     args = parser.parse_args(argv)
@@ -411,6 +464,8 @@ def main(argv=None):
     if args.port is None:
         args.port = int(env.get("OURA_PORT") or DEFAULT_PORT)
     source = build_source(args, env)
+    if args.check:
+        sys.exit(run_check(source))
 
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(source, args.port))
     url = f"http://localhost:{args.port}/"

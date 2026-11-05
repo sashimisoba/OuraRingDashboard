@@ -38,6 +38,7 @@ class FakeOura:
         self.fail = {}  # path -> [(status, body, headers), ...], each served once
         self.pages = {}  # path -> list of page dicts
         self.revoked = []
+        self.reject_all = False  # refuse every access token, even freshly refreshed ones
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -88,7 +89,7 @@ class FakeOura:
                     failures = fake.fail.get(url.path)
                     failure = failures.pop(0) if failures else None
                 auth = self.headers.get("Authorization", "")
-                if auth.removeprefix("Bearer ") not in fake.valid_tokens:
+                if fake.reject_all or auth.removeprefix("Bearer ") not in fake.valid_tokens:
                     return self._reply(401, {"status": 401, "title": "Invalid Access Token"})
                 if failure:
                     return self._reply(*failure)
@@ -137,6 +138,12 @@ class ClientTestCase(unittest.TestCase):
         state = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["state"][0]
         self.client.handle_callback("good-code", state)
 
+    def age_token(self):
+        """Pretend the saved token was issued an hour ago (a 401 then triggers a refresh)."""
+        tokens = self.store.load()
+        tokens["obtained_at"] = time.time() - 3600
+        self.store.save(tokens)
+
 
 class OAuthTests(ClientTestCase):
     def test_authorization_url_has_pkce_and_scopes(self):
@@ -147,12 +154,18 @@ class OAuthTests(ClientTestCase):
         self.assertEqual(q["response_type"], ["code"])
         self.assertEqual(q["client_id"], ["cid"])
         self.assertEqual(q["redirect_uri"], ["http://localhost:8765/callback"])
-        self.assertIn("daily", q["scope"][0].split())
+        # No scope by default: Oura then uses the scopes the app was registered with.
+        self.assertNotIn("scope", q)
         self.assertEqual(q["code_challenge_method"], ["S256"])
         verifier = self.client._pending[q["state"][0]][0]
         self.assertTrue(43 <= len(verifier) <= 128)
         expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
         self.assertEqual(q["code_challenge"], [expected])
+
+    def test_scope_override_is_sent(self):
+        self.client.scopes = "daily heartrate stress"
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.client.authorization_url()).query)
+        self.assertEqual(q["scope"], ["daily heartrate stress"])
 
     def test_callback_exchanges_code_and_saves_tokens_privately(self):
         url = self.client.authorization_url()
@@ -214,6 +227,7 @@ class DataTests(ClientTestCase):
 
     def test_401_refreshes_once_and_retries(self):
         self.login()
+        self.age_token()
         self.fake.valid_tokens = {"access-2"}  # access-1 was revoked server-side
         page = self.client.get("/v2/usercollection/daily_sleep")
         self.assertEqual(page["data"], [])
@@ -232,6 +246,7 @@ class DataTests(ClientTestCase):
 
     def test_revoked_refresh_token_logs_out(self):
         self.login()
+        self.age_token()
         self.fake.valid_tokens = set()
         self.fake.refresh_tokens = {}
         with self.assertRaises(NotAuthenticated):
@@ -240,6 +255,7 @@ class DataTests(ClientTestCase):
 
     def test_concurrent_401s_refresh_only_once(self):
         self.login()
+        self.age_token()
         self.fake.valid_tokens = {"access-2"}
         errors = []
 
@@ -257,6 +273,27 @@ class DataTests(ClientTestCase):
         self.assertEqual(errors, [])
         refreshes = [c for c in self.fake.token_calls if c["grant_type"] == "refresh_token"]
         self.assertEqual(len(refreshes), 1)
+
+    def test_missing_scope_401_does_not_refresh(self):
+        self.login()
+        self.age_token()
+        path = "/v2/usercollection/daily_stress"
+        self.fake.fail[path] = [(401, {"status": 401, "title": "Missing Scopes", "detail": "Required scopes: stress"}, {})]
+        with self.assertRaisesRegex(OuraError, "Missing Scopes: Required scopes: stress") as ctx:
+            self.client.get(path)
+        self.assertEqual(ctx.exception.status, 401)
+        self.assertNotIsInstance(ctx.exception, NotAuthenticated)
+        self.assertEqual([c for c in self.fake.token_calls if c["grant_type"] == "refresh_token"], [])
+        self.assertEqual(self.store.load()["refresh_token"], "refresh-1")
+
+    def test_still_401_after_refresh_is_a_per_call_error(self):
+        self.login()
+        self.age_token()
+        self.fake.reject_all = True  # refresh succeeds, but the new token is refused too
+        with self.assertRaises(OuraError) as ctx:
+            self.client.get("/v2/usercollection/daily_sleep")
+        self.assertEqual(ctx.exception.status, 401)
+        self.assertIn("Invalid Access Token", str(ctx.exception))
 
     def test_429_waits_for_retry_after(self):
         self.login()
@@ -312,6 +349,34 @@ class LiveSourceTests(ClientTestCase):
         count = len(self.fake.requests)
         source.dashboard(dt.date(2026, 11, 1), dt.date(2026, 11, 3), refresh=True)
         self.assertGreater(len(self.fake.requests), count)
+
+    def test_one_collection_401_does_not_log_out(self):
+        self.login()
+        self.fake.pages["/v2/usercollection/daily_sleep"] = [[{"day": "2026-11-03", "score": 75}]]
+        self.fake.fail["/v2/usercollection/daily_stress"] = [(401, {"status": 401, "title": "Missing Scopes", "detail": "stress"}, {})]
+        payload = server.LiveSource(self.client).dashboard(dt.date(2026, 11, 1), dt.date(2026, 11, 3))
+        self.assertEqual(payload["data"]["daily_sleep"], [{"day": "2026-11-03", "score": 75}])
+        self.assertIn("Missing Scopes", payload["errors"]["daily_stress"])
+        self.assertIsNotNone(self.store.load())
+
+    def test_fresh_token_refused_everywhere_means_log_in_again(self):
+        self.login()
+        self.fake.reject_all = True
+        with self.assertRaisesRegex(NotAuthenticated, "断られました.*Invalid Access Token"):
+            server.LiveSource(self.client).dashboard(dt.date(2026, 11, 1), dt.date(2026, 11, 3))
+        self.assertIsNone(self.store.load())
+        # A just-issued token is not expired, so no refresh token is spent.
+        self.assertEqual([c for c in self.fake.token_calls if c["grant_type"] == "refresh_token"], [])
+
+    def test_old_token_refused_everywhere_refreshes_once(self):
+        self.login()
+        self.age_token()
+        self.fake.reject_all = True  # the refresh succeeds but every token is refused
+        with self.assertRaisesRegex(NotAuthenticated, "断られました"):
+            server.LiveSource(self.client).dashboard(dt.date(2026, 11, 1), dt.date(2026, 11, 3))
+        self.assertIsNone(self.store.load())
+        refreshes = [c for c in self.fake.token_calls if c["grant_type"] == "refresh_token"]
+        self.assertEqual(len(refreshes), 1)
 
     def test_slim_sleep_keeps_samples_for_the_latest_drawable_night(self):
         hr = {"interval": 300, "items": [60], "timestamp": "x"}
